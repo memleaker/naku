@@ -1,0 +1,35 @@
+cmake_minimum_required(VERSION 3.0)
+
+# test 需要放在头部
+# add_subdirectory(${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests)
+
+# project
+project(naku)
+
+# cpp standard
+set(CMAKE_CXX_STANDARD 20)
+
+# headers
+include_directories(include)
+
+# source
+file(GLOB SOURCES "naku/*")
+
+# compiler
+set(CMAKE_CXX_COMPILER "/usr/bin/g++")
+
+# compiler flag
+set(CMAKE_BUILD_TYPE Release)
+set(CMAKE_CXX_FLAGS "-g -Wall -fcoroutines")
+
+# traget
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR})
+add_library(naku SHARED ${SOURCES})
+
+# ld
+target_link_libraries(amani pthread)
+#target_link_libraries(amani pthread ssl crypto)
+
+# install
+install(FILES include/* DESTINATION /usr/include)
+install(FILES libnaku.so DESTINATION /usr/lib)
