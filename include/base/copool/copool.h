@@ -12,26 +12,25 @@
 #include <coroutine>
 #include <functional>
 #include <iostream>
+#include <semaphore>
 
 #include <unistd.h>
 #include <sys/epoll.h>
 #include <sys/types.h>
 
 #include "base/poller/epoller.h"
-#include "base/copool/thpool.h"
 #include "base/copool/netio_task.h"
-#include "base/copool/task_queue.h"
+#include "base/utils/task_queue.h"
+#include "base/utils/utils.h"
 
 namespace naku { namespace base {
 
-/* Singleton Pattern */
+/* @brief 协程池类, 全局唯一实例, 单例模式 */
 class netco_pool
 {
 private:
 	/* @brief 默认工作线程数量为2, 实际情况会多创建一个线程用于监控IO事件 */
-	netco_pool(unsigned int threadnum = 2) : 
-		terminated(true), sche_threads(threadnum), total_threads(threadnum+1), thpool(threadnum+1),
-		task_queues(std::vector<task_queue<netio_task>>(threadnum)) {}
+	netco_pool(unsigned int _nthreads = 2) : terminated(true), nthreads(_nthreads) {}
 
     /* @brief 禁用拷贝和移动 */
     netco_pool(const netco_pool &) = delete;
@@ -46,27 +45,39 @@ public:
 		return pool;
 	}
 
-	/* @brief Member Functions */
 public:
 	/* @brief 初始化协程池 */
 	void init(void)
 	{
+		long n;
+		
 		/* 0. 标记协程池运行状态 */
 		terminated = false;
 
-		/* 1. 创建epoll线程 */
-		poll = std::make_shared<epoller>();
+		/* 1. 启动IO监控线程 */
+		io_worker = std::make_unique<iomul_worker>(new epoller(), this);
+		(*io_worker)();
 
-		/* 2. 启动线程池, 等待任务 */
-		thpool.init();
+		/* 2. 启动调度线程 */
+		if ((n = utils::thread_num()) == -1) {
+			// log("Get Core number failed, create n_threads thread")
+			n = nthreads;
+		}
 
-		/* 3. 向线程池的工作线程提交工作任务
-		      第一个线程为监控IO事件线程，其它为调度用户协程的进程
-		 */
-		thpool.submit([this] { this->poll_run(); });
-		for (unsigned int i = 0; i < sche_threads; i++)
+		for (long i = 0; i < n; i++)
 		{
-			thpool.submit([i, this] {this->co_run(task_queues[i]);});
+			sched_worker &w = sched_workers.emplace_back(sched_worker(this));
+			w();
+		}
+	}
+
+	/* @brief 阻塞等待协程池结束 */
+	void evloop(void)
+	{
+		io_worker->stop();
+		for (auto &w : sched_workers)
+		{
+			w.stop();
 		}
 	}
 
@@ -74,7 +85,7 @@ public:
 	void shutdown(void)
 	{
 		terminated = true;
-		thpool.shutdown();
+		evloop();
 	}
 
 	/* 
@@ -85,119 +96,137 @@ public:
    	template <typename F, typename... Args>
 	void submit(F &&f, Args &&...args)
 	{
-		static int thid = 0;
-
 		/* 
 		 1. submit 时, 直接运行协程, 由于协程设置启动时挂起
 		    即可在这里取到协程的handle
 		 2. 取到handle, 将返回的netio_task存储起来, 方便对协程进行控制(恢复)
 		 3. 将线程按照任务数量排序，将任务放到任务量最少的线程上去
-		    当最少的线程任务量达到
 		*/
 		netio_task task_handle = f(args...);
-		task_queues[thid++ % sche_threads].enqueue(task_handle);
+
+		/* 排序要考虑线程安全, 加锁 */
+		std::unique_lock<std::mutex> lock(submit_lock);
+
+		/* 不必排序吧，用堆选出最小的就行了 */
+
 	}
 
-	/* 
-	 * @brief 对协程IO事件进行监控, 发生IO事件时修改协程状态
-	 */
-	void poll_run(void)
+public:
+	/* @brief IO多路复用监控IO事件线程 */
+	class iomul_worker
 	{
-		while (!terminated)
+	public:
+		iomul_worker(poller *_poller, netco_pool *_pool) : 
+			poll(_poller), pool(_pool) {}
+
+		/* @brief 新增IO事件进行监控 */
+		int ioevent_add(netio_task *task, int events);
+
+		/* @brief 对协程IO事件进行监控, 发生IO事件时修改协程状态 */
+		void operator()(void);
+
+		/* @brief 等待线程结束 */
+		void stop(void);
+
+	private:
+		std::thread th;
+		std::unique_ptr<poller> poll;
+		netco_pool *pool;
+	};
+
+	/* @brief 调度执行协程的线程 */
+	class sched_worker
+	{
+	private:
+		sched_worker() = delete;
+		sched_worker(const sched_worker &) = delete;
+
+	public:
+		sched_worker(netco_pool *_pool) : 
+			tasknum(0), pool(_pool), m_cond_lock(new std::mutex), m_cond(new std::condition_variable) {}
+
+		/* @brief move construct. */
+		sched_worker(sched_worker&& w)
 		{
-			if (poll->ioevent_handle() == -1)
+			netio_task t;
+
+			if (this == &w) {
+				return;
+			}
+
+			this->tasknum = w.tasknum;
+			this->th = std::move(w.th);
+			this->pool = w.pool;
+			this->m_cond = std::move(w.m_cond);
+			this->m_cond_lock = std::move(w.m_cond_lock);
+
+			while (!this->task_que.empty()) this->task_que.dequeue(t);
+			while (!w.task_que.empty())
 			{
-				LOG_ERROR << "poll thread exit!!!" << std::endl;
-				return ;
+				w.task_que.dequeue(t);
+				this->task_que.enqueue(t);
 			}
 		}
-	}
 
-	/* 
-	 * @brief 对协程进行调度, 销毁运行结束的协程, 处理协程IO事件
-     *        这里使用了一个与用户线程交互的任务队列和调度线程独有的任务列表
-	 *        解决了用户线程提交任务和调度线程遍历任务调度的竞争问题
-	 * @param task_que 保存用户submit的协程任务
-	 * @param poll IO多路复用对象，用于监控IO事件
-	 */
-	void co_run(task_queue<netio_task> &task_que)
-	{
-		netio_task t;
-		std::list<netio_task> task_list;
+		/* 
+		* @brief 对协程进行调度, 销毁运行结束的协程, 处理协程IO事件
+		*        这里使用了一个与用户线程交互的任务队列和调度线程独有的任务列表
+		*        解决了用户线程提交任务和调度线程遍历任务调度的竞争问题
+		* @param task_que 保存用户submit的协程任务
+		* @param poll IO多路复用对象，用于监控IO事件
+		*/
+		void operator()(void);
 
-		while (!terminated)
+		/* @brief 轮循调度协程 */
+		void rr_sched(std::list<netio_task>& list);
+
+		/*
+		 * @brief 等待线程结束
+		*/
+		void stop(void);
+
+		/* @brief 获取任务数量 */
+		std::size_t taskcount(void) {return *tasknum;}
+
+		/* @brief 重载运算符支持比较，用于排序 */
+		bool operator>(sched_worker& w) {return this->tasknum > w.tasknum;}
+		bool operator<(sched_worker& w) {return this->tasknum < w.tasknum;}
+		bool operator>=(sched_worker& w) {return this->tasknum >= w.tasknum;}
+		bool operator<=(sched_worker& w) {return this->tasknum <= w.tasknum;}
+		bool operator==(sched_worker& w) {return this->tasknum == w.tasknum;}
+		bool operator!=(sched_worker& w) {return this->tasknum != w.tasknum;}
+
+		/* @brief 提交任务 */
+		void submit(netio_task task)
 		{
-			/* 0. 从任务队列中取任务放到任务列表中, 头插: 新任务优先调度 */
-			while (task_que.dequeue(t))
-			{
-				task_list.emplace_front(t);
-			}
-
-			/* 1. 等待任务列表不为空 */
-			if (task_list.empty())
-			{
-				usleep(1);
-				continue;
-			}
-
-			/* 2. 从任务列表中取出任务执行 */
-			for (auto it = task_list.begin(); \
-				((!terminated) && (it != task_list.end()));)
-			{
-				if (it->handle_.promise().run_state == CO_RUNNING)
-				{
-					/* 恢复协程运行, 协程resume恢复后再次挂起或返回时，resume函数返回 */
-					it->handle_.resume();
-
-					/* 如果任务需要IO阻塞, 将IO任务交由Epoll监控
-					 * 在监控过程中, 该协程不会被调度执行, 直到IO事件发生, 协程状态恢复为RUNNING
-					 */
-					if (it->handle_.promise().run_state == CO_IOWAIT)
-					{
-						/* &*it 取到元素的地址 */
-						poll->ioevent_add(&(*it), it->handle_.promise().events);
-					}
-					/* 如果协程结束, 则销毁 */
-					else if (it->handle_.done())
-					{
-						/* 设置协程在结束时挂起, 因为下面还要使用
-						 * 如果结束时不挂起, 则resume返回后handle就已经销毁, 后面不能再使用
-						 * 设置了结束时挂起, 需要手动销毁协程: 调用 destroy()
-						 */
-						it->handle_.destroy();
-						task_list.erase(it++);  /* 传递给erase一个副本, 自身自增 */
-						continue;
-					}
-					else
-					{
-						/* 协程既未返回co_return, 也未挂起, 但resume结束了 */
-						LOG_FATAL << "internal error : coroutine stop but not return or suspend" << std::endl;
-					}
-				}
-
-				/* 为实现遍历中删除节点, 不在for语句中写自增 */
-				it++;
-			}
+			tasknum++;
+			task_que.enqueue(task);
+			m_cond->notify_one();			
 		}
-	}
+
+	private:
+		posit_num tasknum;
+		std::thread th;
+		netco_pool *pool;
+		task_queue<netio_task> task_que;
+
+		/* 
+		 * @brief 没有直接定义, 而是使用指针是因为 mutex和cond不可拷贝不可移动
+		 * 使用vector需要实现移动构造函数, 因此需要实现移动
+		 * 排序时swap也需要实现移动构造函数
+		 */
+		std::unique_ptr<std::mutex> m_cond_lock;
+		std::unique_ptr<std::condition_variable> m_cond;
+	};
 
 private:
 	bool terminated;
+	unsigned int nthreads;
 
-	/* 调度线程数量和总线程数量 */
-	unsigned int sche_threads;
-	unsigned int total_threads;
+	std::mutex submit_lock;
 
-	/* 线程池 */
-	thread_pool thpool;
-
-	/* poller */
-	std::shared_ptr<poller> poll;
-
-	/* 一个线程一个任务队列, 用于暂存用户提交的协程任务
-	   一个线程一个，避免了多线程使用一个队列发生竞争的情况
-	 */
-	std::vector<task_queue<netio_task>> task_queues;
+	std::unique_ptr<iomul_worker> io_worker;
+	std::vector<sched_worker> sched_workers;
 };
 
 } } // namespace

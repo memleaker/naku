@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cerrno>
+#include <cstring>
 
 #include <unistd.h>
 #include <sys/epoll.h>
@@ -18,7 +19,7 @@
 #include <openssl/err.h>
 #endif
 
-#include "copool.h"
+#include "base/copool/netio_task.h"
 
 namespace naku { namespace base {
 

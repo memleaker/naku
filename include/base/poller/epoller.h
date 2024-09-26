@@ -30,7 +30,7 @@ public:
 	virtual ~epoller() noexcept override { ::close(epoll_fd); }
 
 	/* @brief 添加IO事件监控 */
-	virtual int ioevent_add(netio_task* task, uint32_t events) override;
+	virtual int ioevent_add(int fd, uint32_t events, void *pridata) override;
 
 	/* @brief 当关闭fd时, 会自动从epoll中移除, 因此该函数不常调用 */ 
 	virtual int ioevent_del(int fd) override;

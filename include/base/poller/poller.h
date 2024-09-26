@@ -2,8 +2,7 @@
 #define AMANI_POLLER_H
 
 #include <cstdint>
-
-#include "base/copool/netio_task.h"
+#include <functional>
 
 namespace naku { namespace base {
 
@@ -11,7 +10,11 @@ namespace naku { namespace base {
 class poller
 {
 public:
-	virtual int ioevent_add(netio_task*, uint32_t) = 0;
+	poller() : callback(nullptr) {}
+
+	void set_callback(std::function<void(void*)> _c) { callback = _c; }
+
+	virtual int ioevent_add(int fd, uint32_t, void *pridata) = 0;
 	virtual int ioevent_del(int) = 0;
 	virtual int ioevent_handle(void) = 0;
 	/* 
@@ -19,6 +22,8 @@ public:
 	 * 因此直接写成虚函数, 而非纯虚函数
 	 */
     virtual ~poller() {};
+protected:
+	std::function<void(void*)> callback;
 };
 
 } } // namespace

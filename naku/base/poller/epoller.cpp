@@ -3,9 +3,9 @@
 namespace naku { namespace base {
 
 /* @brief 添加IO事件监控 */
-int epoller::ioevent_add(netio_task* task, uint32_t events)
+int epoller::ioevent_add(int fd, uint32_t events, void *pridata)
 {
-    int fd, ret;
+    int ret;
     epoll_event ev;
 
     /* @brief
@@ -17,9 +17,8 @@ int epoller::ioevent_add(netio_task* task, uint32_t events)
         *  3. 因此对于传入的fd，先使用MOD操作(MOD频繁),如果报错 ENOENT
         *     那么再使用ADD操作加入到epoll中(libevent即是这样做的) 
         */
-    fd = task->handle_.promise().fd;
     ev.events   = events | EPOLLONESHOT;
-    ev.data.ptr = task;
+    ev.data.ptr = pridata;
 
     ret = epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &ev);
     if (ret == 0) {
@@ -50,7 +49,6 @@ int epoller::ioevent_del(int fd)
 int epoller::ioevent_handle(void)
 {
     int i, n;
-    netio_task *task;
     epoll_event evs[4096];
 
 again:
@@ -67,10 +65,8 @@ again:
     /* traverse events */
     for (i = 0; i < n; i++)
     {
-        // 标记对应的协程从IOWAIT到RUNNING
-        task = static_cast<netio_task*>(evs[i].data.ptr);
-        if (task) {
-            task->handle_.promise().run_state = CO_RUNNING;
+        if (callback) {
+            callback(evs[i].data.ptr);
         }
     }
 
