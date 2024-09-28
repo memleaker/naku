@@ -18,10 +18,10 @@
 #include <sys/epoll.h>
 #include <sys/types.h>
 
-#include "base/poller/epoller.h"
-#include "base/copool/netio_task.h"
-#include "base/utils/task_queue.h"
-#include "base/utils/utils.h"
+#include <naku/base/poller/epoller.h>
+#include <naku/base/copool/netio_task.h>
+#include <naku/base/utils/task_queue.h>
+#include <naku/base/utils/utils.h>
 
 namespace naku { namespace base {
 
@@ -99,7 +99,7 @@ public:
 	 * @param args 待执行任务的参数
 	 */
    	template <typename F, typename... Args>
-	void submit(F &&f, Args &&...args)
+	netio_task submit(F &&f, Args &&...args)
 	{
 		/* 
 		 1. submit 时, 直接运行协程, 由于协程设置启动时挂起
@@ -117,6 +117,8 @@ public:
 			auto worker = sched_workers.top();
 			worker.submit(task_handle);
 		}
+
+		return task_handle;
 	}
 
 public:

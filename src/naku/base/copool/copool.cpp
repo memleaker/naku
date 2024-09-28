@@ -1,6 +1,6 @@
 
-#include "base/copool/copool.h"
-#include "base/utils/utils.h"
+#include <naku/base/copool/copool.h>
+#include <naku/base/utils/utils.h>
 
 namespace naku { namespace base {
 
@@ -105,11 +105,14 @@ void netco_pool::sched_worker::rr_sched(std::list<netio_task>& task_list)
             /* 如果协程结束, 则销毁 */
             else if (it->handle_.done())
             {
-                /* 设置协程在结束时挂起, 因为下面还要使用
-                    * 如果结束时不挂起, 则resume返回后handle就已经销毁, 后面不能再使用
-                    * 设置了结束时挂起, 需要手动销毁协程: 调用 destroy()
-                    */
-                it->handle_.destroy();
+                /* @brief 设置协程在结束时挂起, 因为下面还要使用
+                 * 如果结束时不挂起, 则resume返回后handle就已经销毁, 后面不能再使用
+                 * 设置了结束时挂起, 需要手动销毁协程: 调用 destroy()
+                 */
+                
+                /* 如果有人在等待协程结束, 那么不要直接销毁, 交给等待的人销毁 */
+                if (!it->handle_.promise().wait)
+                    it->handle_.destroy();
                 task_list.erase(it++);  /* 传递给erase一个副本, 自身自增 */
                 tasknum--;
                 continue;

@@ -19,18 +19,18 @@
 #include <openssl/err.h>
 #endif
 
-#include "base/copool/netio_task.h"
+#include <naku/base/copool/netio_task.h>
 
 namespace naku { namespace base {
 
 /* @brief 封装socket, 创建非阻塞socket */
-int amani_socket(int domain, int type, int protocol)
+static inline int naku_socket(int domain, int type, int protocol)
 {
 	return socket(domain, type | SOCK_NONBLOCK, protocol);
 }
 
 /* @brief 封装bind, listen接口 */
-int amani_listen(int fd, uint32_t ipaddr, uint16_t port)
+static inline int naku_listen(int fd, uint32_t ipaddr, uint16_t port)
 {
 	int ret;
 	sockaddr_in addr;

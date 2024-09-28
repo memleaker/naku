@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.30)
 
-# test 需要放在头部
-# add_subdirectory(${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests)
+# 子目录需要放在头部
+add_subdirectory(${CMAKE_SOURCE_DIR}/examples ${CMAKE_SOURCE_DIR}/examples)
 
 # project
 project(naku)
@@ -13,7 +13,7 @@ set(CMAKE_CXX_STANDARD 20)
 include_directories(include)
 
 # source
-file(GLOB_RECURSE SOURCES "naku/*")
+file(GLOB_RECURSE SOURCES "src/*")
 
 # compiler
 set(CMAKE_CXX_COMPILER "/usr/bin/g++")
@@ -32,5 +32,5 @@ set_target_properties(naku PROPERTIES LINKER_LANGUAGE CXX)
 #target_link_libraries(naku pthread ssl crypto)
 
 # install
-install(FILES include/* DESTINATION /usr/include)
-install(FILES libnaku.so DESTINATION /usr/lib)
+install(DIRECTORY ${CMAKE_SOURCE_DIR}/include/naku/ DESTINATION /usr/include/)
+install(FILES ${CMAKE_SOURCE_DIR}/libnaku.so DESTINATION /usr/lib)
