@@ -56,7 +56,7 @@ public:
 
 		/* 1. 启动IO监控线程 */
 		io_worker = std::make_unique<iomul_worker>(new epoller(), this);
-		(*io_worker)();
+		io_worker->running();
 
 		/* 2. 启动调度线程 */
 		if ((n = utils::thread_num()) == -1) {
@@ -66,8 +66,10 @@ public:
 
 		for (long i = 0; i < n; i++)
 		{
-			sched_worker &w = sched_workers.emplace_back(sched_worker(this));
-			w();
+			sched_worker w(this);
+			w.running();
+
+			sched_workers.push(std::move(w));
 		}
 	}
 
@@ -75,9 +77,12 @@ public:
 	void evloop(void)
 	{
 		io_worker->stop();
-		for (auto &w : sched_workers)
+
+		while (!sched_workers.empty())
 		{
+			sched_worker w = sched_workers.top();
 			w.stop();
+			sched_workers.pop();
 		}
 	}
 
@@ -100,15 +105,18 @@ public:
 		 1. submit 时, 直接运行协程, 由于协程设置启动时挂起
 		    即可在这里取到协程的handle
 		 2. 取到handle, 将返回的netio_task存储起来, 方便对协程进行控制(恢复)
-		 3. 将线程按照任务数量排序，将任务放到任务量最少的线程上去
+		 3. 使用优先队列(堆实现), 将任务放到任务量最少的线程上去
 		*/
 		netio_task task_handle = f(args...);
-
-		/* 排序要考虑线程安全, 加锁 */
+		
+		/* @brief lock 用于保护数据结构 sched_workers */
 		std::unique_lock<std::mutex> lock(submit_lock);
 
-		/* 不必排序吧，用堆选出最小的就行了 */
-
+		/* @brief 获取最小任务数量的worker*/
+		if (!sched_workers.empty()) {
+			auto worker = sched_workers.top();
+			worker.submit(task_handle);
+		}
 	}
 
 public:
@@ -123,7 +131,7 @@ public:
 		int ioevent_add(netio_task *task, int events);
 
 		/* @brief 对协程IO事件进行监控, 发生IO事件时修改协程状态 */
-		void operator()(void);
+		void running(void);
 
 		/* @brief 等待线程结束 */
 		void stop(void);
@@ -139,34 +147,69 @@ public:
 	{
 	private:
 		sched_worker() = delete;
-		sched_worker(const sched_worker &) = delete;
 
 	public:
 		sched_worker(netco_pool *_pool) : 
-			tasknum(0), pool(_pool), m_cond_lock(new std::mutex), m_cond(new std::condition_variable) {}
+			tasknum(0), pool(_pool), task_que(std::make_shared<task_queue<netio_task>>()), 
+			m_cond_lock(std::make_shared<std::mutex>()), m_cond(std::make_shared<std::condition_variable>()) {}
+
+		/* @brief copy construct. */
+		sched_worker(const sched_worker &w)
+		{
+			if (this == &w)
+				return;
+
+			this->tasknum = w.tasknum;
+			this->th = w.th;
+			this->pool = w.pool;
+			this->m_cond = w.m_cond;
+			this->m_cond_lock = w.m_cond_lock;
+			this->task_que = w.task_que;
+		}
+
+		sched_worker& operator=(const sched_worker& w)
+		{
+			if (this == &w)
+				return *this;
+
+			this->tasknum = w.tasknum;
+			this->th = w.th;
+			this->pool = w.pool;
+			this->m_cond = w.m_cond;
+			this->m_cond_lock = w.m_cond_lock;
+			this->task_que = w.task_que;
+
+			return *this;
+		}
 
 		/* @brief move construct. */
 		sched_worker(sched_worker&& w)
 		{
-			netio_task t;
-
-			if (this == &w) {
+			if (this == &w)
 				return;
-			}
 
 			this->tasknum = w.tasknum;
 			this->th = std::move(w.th);
 			this->pool = w.pool;
 			this->m_cond = std::move(w.m_cond);
 			this->m_cond_lock = std::move(w.m_cond_lock);
-
-			while (!this->task_que.empty()) this->task_que.dequeue(t);
-			while (!w.task_que.empty())
-			{
-				w.task_que.dequeue(t);
-				this->task_que.enqueue(t);
-			}
+			this->task_que = std::move(w.task_que);
 		}
+
+		sched_worker& operator=(sched_worker&& w)
+		{
+			if (this == &w)
+				return *this;
+
+			this->tasknum = w.tasknum;
+			this->th = std::move(w.th);
+			this->pool = w.pool;
+			this->m_cond = std::move(w.m_cond);
+			this->m_cond_lock = std::move(w.m_cond_lock);
+			this->task_que = std::move(w.task_que);
+			return *this;
+		}
+
 
 		/* 
 		* @brief 对协程进行调度, 销毁运行结束的协程, 处理协程IO事件
@@ -175,7 +218,7 @@ public:
 		* @param task_que 保存用户submit的协程任务
 		* @param poll IO多路复用对象，用于监控IO事件
 		*/
-		void operator()(void);
+		void running(void);
 
 		/* @brief 轮循调度协程 */
 		void rr_sched(std::list<netio_task>& list);
@@ -189,34 +232,35 @@ public:
 		std::size_t taskcount(void) {return *tasknum;}
 
 		/* @brief 重载运算符支持比较，用于排序 */
-		bool operator>(sched_worker& w) {return this->tasknum > w.tasknum;}
-		bool operator<(sched_worker& w) {return this->tasknum < w.tasknum;}
-		bool operator>=(sched_worker& w) {return this->tasknum >= w.tasknum;}
-		bool operator<=(sched_worker& w) {return this->tasknum <= w.tasknum;}
-		bool operator==(sched_worker& w) {return this->tasknum == w.tasknum;}
-		bool operator!=(sched_worker& w) {return this->tasknum != w.tasknum;}
+		bool operator>(const sched_worker& w) const {return this->tasknum > w.tasknum;}
+		bool operator<(const sched_worker& w) const {return this->tasknum < w.tasknum;}
+		bool operator>=(const sched_worker& w) const {return this->tasknum >= w.tasknum;}
+		bool operator<=(const sched_worker& w) const {return this->tasknum <= w.tasknum;}
+		bool operator==(const sched_worker& w) const {return this->tasknum == w.tasknum;}
+		bool operator!=(const sched_worker& w) const {return this->tasknum != w.tasknum;}
 
 		/* @brief 提交任务 */
 		void submit(netio_task task)
 		{
+			std::unique_lock<std::mutex> lock(*m_cond_lock);
 			tasknum++;
-			task_que.enqueue(task);
-			m_cond->notify_one();			
+			task_que->enqueue(task);
+			m_cond->notify_one();
 		}
 
 	private:
 		posit_num tasknum;
-		std::thread th;
 		netco_pool *pool;
-		task_queue<netio_task> task_que;
 
 		/* 
-		 * @brief 没有直接定义, 而是使用指针是因为 mutex和cond不可拷贝不可移动
-		 * 使用vector需要实现移动构造函数, 因此需要实现移动
-		 * 排序时swap也需要实现移动构造函数
+		 * @brief 使用指针是因为mutex和cond不可拷贝不可移动, thread不可拷贝
+		 * 使用proity_queue需要实现拷贝构造
+		 * 使用vector需要实现拷贝或移动构造函数
 		 */
-		std::unique_ptr<std::mutex> m_cond_lock;
-		std::unique_ptr<std::condition_variable> m_cond;
+		std::shared_ptr<std::thread> th;
+		std::shared_ptr<task_queue<netio_task>> task_que;
+		std::shared_ptr<std::mutex> m_cond_lock;
+		std::shared_ptr<std::condition_variable> m_cond;
 	};
 
 private:
@@ -226,7 +270,7 @@ private:
 	std::mutex submit_lock;
 
 	std::unique_ptr<iomul_worker> io_worker;
-	std::vector<sched_worker> sched_workers;
+	std::priority_queue<sched_worker, std::vector<sched_worker>, std::greater<sched_worker>> sched_workers;
 };
 
 } } // namespace

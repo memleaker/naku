@@ -11,7 +11,7 @@ int netco_pool::iomul_worker::ioevent_add(netio_task *task, int events)
 }
 
 /* @brief 对协程IO事件进行监控, 发生IO事件时修改协程状态 */
-void netco_pool::iomul_worker::operator()(void)
+void netco_pool::iomul_worker::running(void)
 {
     /* 设置回调函数, 发生事件时, 将协程状态从IOWAIT修改回RUNNING */
     auto callback = [](void *ptr) {
@@ -49,34 +49,38 @@ void netco_pool::iomul_worker::stop(void)
 *        这里使用了一个与用户线程交互的任务队列和调度线程独有的任务列表
 *        解决了用户线程提交任务和调度线程遍历任务调度的竞争问题
 */
-void netco_pool::sched_worker::operator()(void)
+void netco_pool::sched_worker::running(void)
 {
-    netio_task t;
-    std::list<netio_task> task_list;
+    auto callback = [this]() {
+        netio_task t;
+        std::list<netio_task> task_list;
 
-    while (!pool->terminated)
-    {
+        while (!pool->terminated)
         {
-            std::unique_lock<std::mutex> lock(*m_cond_lock);
-
-            /* 0. 从任务队列中取任务放到任务列表中, 头插: 新任务优先调度 */
-            while (!task_que.empty())
             {
-                task_que.dequeue(t);
-                task_list.emplace_front(t);
+                std::unique_lock<std::mutex> lock(*m_cond_lock);
+
+                /* 0. 从任务队列中取任务放到任务列表中, 头插: 新任务优先调度 */
+                while (!task_que->empty())
+                {
+                    task_que->dequeue(t);
+                    task_list.emplace_front(t);
+                }
+
+                /* 1. 如果任务列表和任务队列均为空, 没有可调度的协程, 等待新任务 */
+                if (task_list.empty())
+                {
+                    m_cond->wait(lock);
+                    continue;
+                }
             }
 
-            /* 1. 如果任务列表和任务队列均为空, 没有可调度的协程, 等待新任务 */
-            if (task_list.empty())
-            {
-                m_cond->wait(lock);
-                continue;
-            }
+            /* 2. 轮循调度 */
+            rr_sched(task_list);
         }
+    };
 
-        /* 2. 轮循调度 */
-        rr_sched(task_list);
-    }
+    th = std::make_shared<std::thread>(callback);
 }
 
 /* @brief 轮循调度协程 */
@@ -126,8 +130,8 @@ void netco_pool::sched_worker::rr_sched(std::list<netio_task>& task_list)
 void netco_pool::sched_worker::stop(void)
 {
     m_cond->notify_all();
-    if (th.joinable())
-        th.join();
+    if (th->joinable())
+        th->join();
 }
 
 } } // namespace
