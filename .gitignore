@@ -2,3 +2,4 @@
 /.vscode/
 libnaku.so
 /examples/build/
+test/ptrthread

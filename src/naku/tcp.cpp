@@ -9,7 +9,9 @@ namespace naku { namespace tcp {
 ssize_t conn::read(char *buf, size_t count)
 {
     auto func = [this, buf, count](void) -> netio_task {
+        std::cout << "read fd : " << fd << std::endl;
         ssize_t n = co_await naku::base::async_read(fd, buf, count);
+        std::cout << "async read" << n << std::endl;
         co_return n;
     };
 
@@ -56,10 +58,10 @@ int listener::accept(std::string &cliip, uint16_t& cliport, conn& c)
         socklen_t   len;
         char buf[INET_ADDRSTRLEN] = {0};
 
-        fd = co_await naku::base::async_accept(fd, (sockaddr*)&addr, &len);
+        fd = co_await naku::base::async_accept(listenfd, (sockaddr*)&addr, &len);
         if (fd == -1)
             co_return -1;
-        
+
         ::inet_ntop(AF_INET, &addr.sin_addr.s_addr, buf, sizeof(buf));
         cliip   = buf;
         cliport = ::ntohs(addr.sin_port);
@@ -72,6 +74,7 @@ int listener::accept(std::string &cliip, uint16_t& cliport, conn& c)
         return -1;
     }
 
+    std::cout << "accept return fd : " << n << std::endl;
     c = conn(n);
     return 0;
 }

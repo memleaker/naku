@@ -25,7 +25,7 @@ void netco_pool::iomul_worker::running(void)
     poll->set_callback(callback);
 
     /* 启动线程, 开始监控事件 */
-    th = std::thread([this]() {
+    th = std::make_unique<std::thread>([this]() {
         while (!pool->terminated)
         {
             if (poll->ioevent_handle() == -1)
@@ -40,8 +40,8 @@ void netco_pool::iomul_worker::running(void)
 /* @brief 等待线程结束 */
 void netco_pool::iomul_worker::stop(void)
 {
-    if (th.joinable())
-        th.join();
+    if (th->joinable())
+        th->join();
 }
 
 /* 
@@ -57,22 +57,21 @@ void netco_pool::sched_worker::running(void)
 
         while (!pool->terminated)
         {
+            /* 0. 从任务队列中取任务放到任务列表中, 头插: 新任务优先调度 */
+            while (!task_que->empty())
             {
+                std::cout << "get task from que" << std::endl;
+                task_que->dequeue(t);
+                task_list.emplace_front(t);
+            }
+
+            /* 1. 如果任务列表和任务队列均为空, 没有可调度的协程, 等待新任务 */
+            if (task_list.empty())
+            {
+                std::cout << "empty task list" << std::endl;
                 std::unique_lock<std::mutex> lock(*m_cond_lock);
-
-                /* 0. 从任务队列中取任务放到任务列表中, 头插: 新任务优先调度 */
-                while (!task_que->empty())
-                {
-                    task_que->dequeue(t);
-                    task_list.emplace_front(t);
-                }
-
-                /* 1. 如果任务列表和任务队列均为空, 没有可调度的协程, 等待新任务 */
-                if (task_list.empty())
-                {
-                    m_cond->wait(lock);
-                    continue;
-                }
+                m_cond->wait(lock);
+                continue;
             }
 
             /* 2. 轮循调度 */
@@ -80,7 +79,7 @@ void netco_pool::sched_worker::running(void)
         }
     };
 
-    th = std::make_shared<std::thread>(callback);
+    th = std::make_unique<std::thread>(callback);
 }
 
 /* @brief 轮循调度协程 */
@@ -109,7 +108,6 @@ void netco_pool::sched_worker::rr_sched(std::list<netio_task>& task_list)
                  * 如果结束时不挂起, 则resume返回后handle就已经销毁, 后面不能再使用
                  * 设置了结束时挂起, 需要手动销毁协程: 调用 destroy()
                  */
-                
                 /* 如果有人在等待协程结束, 那么不要直接销毁, 交给等待的人销毁 */
                 if (!it->handle_.promise().wait)
                     it->handle_.destroy();
